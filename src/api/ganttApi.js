@@ -52,10 +52,13 @@ function normalizePayload(raw) {
   };
 }
 
+const API_BASE = import.meta.env.VITE_API_BASE || "";
+
 export async function fetchGantt(date, { signal } = {}) {
-  const url = `/api/gantt?date=${encodeURIComponent(date)}`;
+  const url = `${API_BASE}/api/gantt?date=${encodeURIComponent(date)}`;
   const resp = await fetch(url, { method: "GET", signal });
 
+  
   if (!resp.ok) {
     const text = await resp.text().catch(() => "");
     throw new Error(`API error (${resp.status}): ${text || resp.statusText}`);
