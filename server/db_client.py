@@ -6,29 +6,56 @@ import pymysql
 import pyodbc
 
 
-DB_ENGINE = os.getenv("DB_ENGINE", "azure").lower()
+def _env(*names: str, default: str | None = None) -> str | None:
+    for name in names:
+        value = os.getenv(name)
+        if value is not None and str(value).strip() != "":
+            return value
+    return default
+
+
+DB_ENGINE = (_env("DB_ENGINE", default="azure") or "azure").lower()
 # mysql | azure
 
-# ---- MariaDB defaults (기존 유지) ----
-MYSQL_USER = os.getenv("DB_USER", "root")
-MYSQL_PASS = os.getenv("DB_PASS", "3644")
-MYSQL_HOST = os.getenv("DB_HOST", "143.248.121.90")
-MYSQL_PORT = int(os.getenv("DB_PORT", "3306"))
-MYSQL_DB = os.getenv("DB_NAME", "hdl")
 
-# ---- Azure SQL defaults ----
-AZURE_USER = os.getenv("AZURE_DB_USER", "drt-kaist@drt-kaist")
-AZURE_PASS = os.getenv("AZURE_DB_PASS", "hdl3644@")
-AZURE_SERVER = os.getenv("AZURE_DB_SERVER", "drt-kaist.database.windows.net")
-AZURE_PORT = int(os.getenv("AZURE_DB_PORT", "1433"))
-AZURE_DB = os.getenv("AZURE_DB_NAME", "HDL")
-AZURE_DRIVER = os.getenv("AZURE_DB_DRIVER", "{ODBC Driver 18 for SQL Server}")
-AZURE_ENCRYPT = os.getenv("AZURE_DB_ENCRYPT", "yes")
-AZURE_TRUST_SERVER_CERT = os.getenv("AZURE_DB_TRUST_SERVER_CERT", "no")
+# ---- MySQL / MariaDB ----
+MYSQL_USER = _env("DB_USER", "MYSQL_USER", default="root")
+MYSQL_PASS = _env("DB_PASS", "DB_PASSWORD", "MYSQL_PASSWORD", default="")
+MYSQL_HOST = _env("DB_HOST", "MYSQL_HOST", default="localhost")
+MYSQL_PORT = int(_env("DB_PORT", "MYSQL_PORT", default="3306"))
+MYSQL_DB = _env("DB_NAME", "MYSQL_DATABASE", default="hdl")
+
+# ---- Azure SQL ----
+AZURE_USER = _env("AZURE_DB_USER", "AZURE_SQL_USER", default="")
+AZURE_PASS = _env("AZURE_DB_PASS", "AZURE_DB_PASSWORD", "AZURE_SQL_PASSWORD", default="")
+AZURE_SERVER = _env("AZURE_DB_SERVER", "AZURE_SQL_SERVER", default="")
+AZURE_PORT = int(_env("AZURE_DB_PORT", "AZURE_SQL_PORT", default="1433"))
+AZURE_DB = _env("AZURE_DB_NAME", "AZURE_SQL_DATABASE", default="")
+AZURE_DRIVER = _env("AZURE_DB_DRIVER", default="{ODBC Driver 18 for SQL Server}")
+AZURE_ENCRYPT = _env("AZURE_DB_ENCRYPT", default="yes")
+AZURE_TRUST_SERVER_CERT = _env("AZURE_DB_TRUST_SERVER_CERT", default="no")
 
 
 def _is_azure() -> bool:
     return DB_ENGINE in {"azure", "sqlserver", "mssql"}
+
+
+def _require_azure_env() -> None:
+    missing = []
+    required = {
+        "AZURE_DB_USER": AZURE_USER,
+        "AZURE_DB_PASS": AZURE_PASS,
+        "AZURE_DB_SERVER": AZURE_SERVER,
+        "AZURE_DB_NAME": AZURE_DB,
+    }
+    for key, value in required.items():
+        if not value:
+            missing.append(key)
+
+    if missing:
+        raise RuntimeError(
+            "Missing Azure SQL environment variables: " + ", ".join(missing)
+        )
 
 
 def _conn():
@@ -37,7 +64,10 @@ def _conn():
     DB_ENGINE=azure  -> pyodbc connection
     """
     if _is_azure():
-        print("[DB] CONNECT → AZURE SQL")
+        _require_azure_env()
+
+        print(f"[DB] CONNECT -> AZURE SQL ({AZURE_SERVER}:{AZURE_PORT} / {AZURE_DB})")
+
         conn_str = (
             f"DRIVER={AZURE_DRIVER};"
             f"SERVER={AZURE_SERVER},{AZURE_PORT};"
@@ -47,10 +77,11 @@ def _conn():
             f"Encrypt={AZURE_ENCRYPT};"
             f"TrustServerCertificate={AZURE_TRUST_SERVER_CERT};"
         )
-        conn = pyodbc.connect(conn_str)
+        conn = pyodbc.connect(conn_str, timeout=10)
         conn.autocommit = True
         return conn
 
+    print(f"[DB] CONNECT -> MYSQL ({MYSQL_HOST}:{MYSQL_PORT} / {MYSQL_DB})")
     return pymysql.connect(
         host=MYSQL_HOST,
         port=MYSQL_PORT,
@@ -125,10 +156,6 @@ def _qualify(schema: str, table: str, alias: str | None = None) -> str:
     """
     MariaDB: hdl.route r
     Azure  : [dbo].[route] r
-
-    주의:
-    - 기존 호출부가 schema='hdl' 를 넘기더라도,
-      Azure SQL에서는 보통 schema가 dbo 이므로 자동 보정.
     """
     alias_sql = f" {alias}" if alias else ""
 
@@ -192,10 +219,6 @@ def get_routes_for_day(schema: str, date_yyyymmdd: int):
 
 
 def get_reservations_by_dispatch_ids(schema: str, dispatch_ids: list[str]):
-    """
-    reservation_request에는 stationName이 없음.
-    passengerCount / wheelchairCount 등을 위해 유지.
-    """
     if not dispatch_ids:
         return []
 
@@ -229,9 +252,6 @@ def get_reservations_by_dispatch_ids(schema: str, dispatch_ids: list[str]):
 
 
 def get_dispatches_by_dispatch_ids(schema: str, dispatch_ids: list[str]):
-    """
-    dispatch 테이블의 pickup/dropoff station 정보를 가져옴.
-    """
     if not dispatch_ids:
         return []
 
