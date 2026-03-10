@@ -1,13 +1,21 @@
 # server/app.py
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
-from gantt_builder import build_gantt_payload
+BASE_DIR = Path(__file__).resolve().parent
 
-load_dotenv()
+# backend env를 가장 먼저 로드
+load_dotenv(BASE_DIR / ".env", override=True)
+
+# 필요 시 루트 env도 추가 로드
+load_dotenv(BASE_DIR.parent / ".env", override=False)
+
+# env 로드가 끝난 뒤에 import
+from gantt_builder import build_gantt_payload
 
 app = Flask(__name__)
 
