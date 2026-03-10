@@ -5,7 +5,6 @@ import ThemeControls from "../components/ThemeControls.jsx";
 import GanttChart from "../components/GanttChart.jsx";
 import { formatKSTDateYYYYMMDD, todayKSTYYYYMMDD } from "../utils/time.js";
 
-
 function Legend() {
   return (
     <div className="legend">
@@ -45,22 +44,36 @@ export default function GanttPage() {
   }, [date]);
 
   async function load() {
-    setLoading(true);
-    setErr("");
-
     if (abortRef.current) abortRef.current.abort();
+
     const controller = new AbortController();
     abortRef.current = controller;
 
+    setLoading(true);
+    setErr("");
+
     try {
       const res = await fetchGantt(date, { signal: controller.signal });
+
+      // 오래된 요청이면 무시
+      if (abortRef.current !== controller) return;
+
+      // abort된 요청이면 무시
+      if (res == null) return;
+
       setData(res);
       setLastUpdated(new Date());
     } catch (e) {
+      // 오래된 요청이면 무시
+      if (abortRef.current !== controller) return;
+
       if (e?.name === "AbortError") return;
       setErr(e?.message || "Failed to load gantt data.");
     } finally {
-      setLoading(false);
+      // 현재 요청일 때만 loading 해제
+      if (abortRef.current === controller) {
+        setLoading(false);
+      }
     }
   }
 

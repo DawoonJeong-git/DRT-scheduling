@@ -31,7 +31,6 @@ function normalizePayload(raw) {
       operationServiceType: v.operationServiceType ?? ""
     })),
 
-    // ✅ IMPORTANT: preserve extra fields for tooltip
     intervals: intervals.map((it) => ({
       vehicleID: String(it.vehicleID ?? ""),
       operationID: it.operationID ?? null,
@@ -42,7 +41,6 @@ function normalizePayload(raw) {
       laneCount: Number.isFinite(it.laneCount) && it.laneCount > 0 ? it.laneCount : 1,
       label: it.label ?? "",
 
-      // --- keep dispatch-derived fields (may be undefined for non-IN_SERVICE) ---
       reserveType: it.reserveType ?? "",
       pickupStationID: it.pickupStationID ?? "",
       dropoffStationID: it.dropoffStationID ?? "",
@@ -56,14 +54,24 @@ const API_BASE = import.meta.env.VITE_API_BASE || "";
 
 export async function fetchGantt(date, { signal } = {}) {
   const url = `${API_BASE}/api/gantt?date=${encodeURIComponent(date)}`;
-  const resp = await fetch(url, { method: "GET", signal });
 
-  
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => "");
-    throw new Error(`API error (${resp.status}): ${text || resp.statusText}`);
+  try {
+    const resp = await fetch(url, { method: "GET", signal });
+
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => "");
+      throw new Error(`API error (${resp.status}): ${text || resp.statusText}`);
+    }
+
+    const json = await resp.json();
+    return normalizePayload(json);
+
+  } catch (e) {
+    // 개발 모드에서 발생하는 abort 요청은 무시
+    if (e.name === "AbortError") {
+      return null;
+    }
+
+    throw e;
   }
-
-  const json = await resp.json();
-  return normalizePayload(json);
 }
