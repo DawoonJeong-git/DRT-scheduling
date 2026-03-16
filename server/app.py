@@ -1,7 +1,7 @@
 # server/app.py
 import os
 from pathlib import Path
-
+import socket
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from flask_cors import CORS
@@ -57,8 +57,7 @@ if __name__ == "__main__":
     app.run(host="0.0.0.0", port=port)
 
 
-    import socket
-from flask import jsonify
+
 
 @app.route("/api/socket-check")
 def socket_check():
