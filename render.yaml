@@ -8,7 +8,5 @@ services:
     healthCheckPath: /health
     autoDeploy: true
     envVars:
-      - key: DB_ENGINE
-        value: azure
-      - key: PYTHON_VERSION
-        value: 3.11.11
+      - key: PORT
+        value: 5056

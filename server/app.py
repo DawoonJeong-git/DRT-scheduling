@@ -8,23 +8,19 @@ from flask_cors import CORS
 
 BASE_DIR = Path(__file__).resolve().parent
 
-
-
-# backend env를 가장 먼저 로드
+# backend env 먼저 로드
 load_dotenv(BASE_DIR / ".env", override=True)
 
-# 필요 시 루트 env도 추가 로드
+# 필요 시 루트 env 추가 로드
 load_dotenv(BASE_DIR.parent / ".env", override=False)
 
 print("\n=== ENV CHECK ===")
-print("DB_ENGINE =", os.getenv("DB_ENGINE"))
-print("AZURE_DB_SERVER =", os.getenv("AZURE_DB_SERVER"))
-print("AZURE_DB_NAME =", os.getenv("AZURE_DB_NAME"))
-print("AZURE_DB_USER =", os.getenv("AZURE_DB_USER"))
+print("PORT =", os.getenv("PORT"))
+print("FLASK_PORT =", os.getenv("FLASK_PORT"))
+print("CORS_ALLOWED_ORIGINS =", os.getenv("CORS_ALLOWED_ORIGINS"))
 print("=================\n")
 
-
-# env 로드가 끝난 뒤에 import
+# env 로드가 끝난 뒤 import
 from gantt_builder import build_gantt_payload
 
 app = Flask(__name__)

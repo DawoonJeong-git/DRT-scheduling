@@ -402,7 +402,8 @@ def _assign_fixed_lanes_for_spans(spans):
 
 
 def build_gantt_payload(date_str: str):
-    schema = os.getenv("DB_SCHEMA", os.getenv("DB_NAME", "hdl"))
+    from db_client import DB_SCHEMA
+    schema = DB_SCHEMA
     date_yyyymmdd = _date_to_yyyymmdd(date_str)
     win_start, win_end = _day_window_ms(date_str)
 

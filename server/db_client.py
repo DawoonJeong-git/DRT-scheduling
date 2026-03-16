@@ -1,127 +1,116 @@
 # server/db_client.py
+
 import os
+import pymysql
 from typing import Any
 
-import pymysql
-import pyodbc
+# --------------------------------------------------
+# DB profile selection
+# --------------------------------------------------
+
+PROFILE_NAME = "hdl"   # "nzero" or "hdl"
+
+# --------------------------------------------------
+# Load config: local(db_config.py) first, then Render env fallback
+# --------------------------------------------------
+
+DB = None
+
+try:
+    from db_config import DB_CONFIGS  # local only
+
+    if PROFILE_NAME in DB_CONFIGS:
+        DB = DB_CONFIGS[PROFILE_NAME]
+        print(f"[DB INIT] Using local db_config.py | PROFILE={PROFILE_NAME}")
+    else:
+        raise KeyError(f"PROFILE_NAME '{PROFILE_NAME}' not found in DB_CONFIGS")
+
+except Exception as e:
+    print(f"[DB INIT] Local db_config.py unavailable or invalid: {e}")
+    print(f"[DB INIT] Falling back to environment variables | PROFILE={PROFILE_NAME}")
+
+    # Render / deployment env fallback
+    if PROFILE_NAME == "nzero":
+        DB = {
+            "host": os.getenv("NZERO_DB_HOST"),
+            "port": int(os.getenv("NZERO_DB_PORT", "3306")),
+            "user": os.getenv("NZERO_DB_USER"),
+            "password": os.getenv("NZERO_DB_PASSWORD"),
+            "database": os.getenv("NZERO_DB_NAME"),
+            "charset": "utf8mb4",
+            "use_unicode": True,
+        }
+
+    elif PROFILE_NAME == "hdl":
+        DB = {
+            "host": os.getenv("HDL_DB_HOST"),
+            "port": int(os.getenv("HDL_DB_PORT", "3306")),
+            "user": os.getenv("HDL_DB_USER"),
+            "password": os.getenv("HDL_DB_PASSWORD"),
+            "database": os.getenv("HDL_DB_NAME"),
+            "charset": "utf8mb4",
+            "use_unicode": True,
+        }
+
+    else:
+        raise ValueError(f"Unsupported PROFILE_NAME: {PROFILE_NAME}")
+
+# --------------------------------------------------
+# Final DB vars
+# --------------------------------------------------
+
+DB_HOST = DB["host"]
+DB_PORT = DB["port"]
+DB_USER = DB["user"]
+DB_PASS = DB["password"]
+DB_DATABASE = DB["database"]
+DB_SCHEMA = DB_DATABASE
+
+if not all([DB_HOST, DB_PORT, DB_USER, DB_PASS, DB_DATABASE]):
+    raise ValueError(
+        f"[DB INIT ERROR] Missing DB config values for PROFILE={PROFILE_NAME}. "
+        f"Check db_config.py or Render environment variables."
+    )
+
+print(f"[DB INIT] PROFILE={PROFILE_NAME} | host={DB_HOST}:{DB_PORT} | db={DB_DATABASE}")
 
 
-def _env(*names: str, default: str | None = None) -> str | None:
-    for name in names:
-        value = os.getenv(name)
-        if value is not None and str(value).strip() != "":
-            return value
-    return default
-
-
-DB_ENGINE = (_env("DB_ENGINE", default="azure") or "azure").lower()
-# mysql | azure
-
-
-# ---- MySQL / MariaDB ----
-MYSQL_USER = _env("DB_USER", "MYSQL_USER", default="root")
-MYSQL_PASS = _env("DB_PASS", "DB_PASSWORD", "MYSQL_PASSWORD", default="")
-MYSQL_HOST = _env("DB_HOST", "MYSQL_HOST", default="localhost")
-MYSQL_PORT = int(_env("DB_PORT", "MYSQL_PORT", default="3306"))
-MYSQL_DB = _env("DB_NAME", "MYSQL_DATABASE", default="hdl")
-
-# ---- Azure SQL ----
-AZURE_USER = _env("AZURE_DB_USER", "AZURE_SQL_USER", default="")
-AZURE_PASS = _env("AZURE_DB_PASS", "AZURE_DB_PASSWORD", "AZURE_SQL_PASSWORD", default="")
-AZURE_SERVER = _env("AZURE_DB_SERVER", "AZURE_SQL_SERVER", default="")
-AZURE_PORT = int(_env("AZURE_DB_PORT", "AZURE_SQL_PORT", default="1433"))
-AZURE_DB = _env("AZURE_DB_NAME", "AZURE_SQL_DATABASE", default="")
-AZURE_DRIVER = _env("AZURE_DB_DRIVER", default="{ODBC Driver 18 for SQL Server}")
-AZURE_ENCRYPT = _env("AZURE_DB_ENCRYPT", default="yes")
-AZURE_TRUST_SERVER_CERT = _env("AZURE_DB_TRUST_SERVER_CERT", default="no")
-
-
-def _is_azure() -> bool:
-    return DB_ENGINE in {"azure", "sqlserver", "mssql"}
-
-
-def _require_azure_env() -> None:
-    missing = []
-    required = {
-        "AZURE_DB_USER": AZURE_USER,
-        "AZURE_DB_PASS": AZURE_PASS,
-        "AZURE_DB_SERVER": AZURE_SERVER,
-        "AZURE_DB_NAME": AZURE_DB,
-    }
-    for key, value in required.items():
-        if not value:
-            missing.append(key)
-
-    if missing:
-        raise RuntimeError(
-            "Missing Azure SQL environment variables: " + ", ".join(missing)
-        )
-
+# --------------------------------------------------
+# connection / fetch
+# --------------------------------------------------
 
 def _conn():
-    """
-    DB_ENGINE=mysql  -> pymysql connection
-    DB_ENGINE=azure  -> pyodbc connection
-    """
-    if _is_azure():
-        _require_azure_env()
-
-        print(f"[DB] CONNECT -> AZURE SQL ({AZURE_SERVER}:{AZURE_PORT} / {AZURE_DB})")
-
-        conn_str = (
-            f"DRIVER={AZURE_DRIVER};"
-            f"SERVER={AZURE_SERVER},{AZURE_PORT};"
-            f"DATABASE={AZURE_DB};"
-            f"UID={AZURE_USER};"
-            f"PWD={AZURE_PASS};"
-            f"Encrypt={AZURE_ENCRYPT};"
-            f"TrustServerCertificate={AZURE_TRUST_SERVER_CERT};"
-        )
-        conn = pyodbc.connect(conn_str, timeout=10)
-        conn.autocommit = True
-        return conn
-
-    print(f"[DB] CONNECT -> MYSQL ({MYSQL_HOST}:{MYSQL_PORT} / {MYSQL_DB})")
+    print(f"[DB] CONNECT -> MARIADB ({DB_HOST}:{DB_PORT} / {DB_DATABASE})")
     return pymysql.connect(
-        host=MYSQL_HOST,
-        port=MYSQL_PORT,
-        user=MYSQL_USER,
-        password=MYSQL_PASS,
-        database=MYSQL_DB,
+        host=DB_HOST,
+        port=DB_PORT,
+        user=DB_USER,
+        password=DB_PASS,
+        database=DB_DATABASE,
         cursorclass=pymysql.cursors.DictCursor,
         autocommit=True,
-        charset="utf8mb4",
-        use_unicode=True,
+        charset=DB["charset"],
+        use_unicode=DB["use_unicode"],
     )
 
 
 def _fetchall(sql: str, params: list[Any] | tuple[Any, ...] | None = None):
-    """
-    MariaDB / Azure 공통 fetchall -> list[dict]
-    """
     params = params or []
 
     with _conn() as c:
         cur = c.cursor()
         try:
             cur.execute(sql, params)
-
-            if _is_azure():
-                columns = [col[0] for col in cur.description]
-                rows = cur.fetchall()
-                return [dict(zip(columns, row)) for row in rows]
-
             return cur.fetchall()
         finally:
             cur.close()
 
 
+# --------------------------------------------------
+# helpers
+# --------------------------------------------------
+
 def _normalize_dispatch_id(x) -> str:
-    """
-    Defensive normalize:
-    - strips whitespace
-    - repeatedly removes wrapping single/double quotes
-    """
     if x is None:
         return ""
     s = str(x).strip()
@@ -135,7 +124,7 @@ def _normalize_dispatch_id(x) -> str:
 
 
 def _placeholder() -> str:
-    return "?" if _is_azure() else "%s"
+    return "%s"
 
 
 def _placeholders(n: int) -> str:
@@ -143,32 +132,20 @@ def _placeholders(n: int) -> str:
 
 
 def _cast_int(expr: str) -> str:
-    """
-    MariaDB: CAST(x AS UNSIGNED)
-    Azure  : TRY_CAST(x AS BIGINT)
-    """
-    if _is_azure():
-        return f"TRY_CAST({expr} AS BIGINT)"
     return f"CAST({expr} AS UNSIGNED)"
 
 
 def _qualify(schema: str, table: str, alias: str | None = None) -> str:
-    """
-    MariaDB: hdl.route r
-    Azure  : [dbo].[route] r
-    """
     alias_sql = f" {alias}" if alias else ""
-
-    if _is_azure():
-        sql_schema = schema
-        if not sql_schema or sql_schema.lower() in {"hdl", "azure_hdl"}:
-            sql_schema = "dbo"
-        return f"[{sql_schema}].[{table}]{alias_sql}"
-
     return f"{schema}.{table}{alias_sql}"
 
 
-def get_operations_catalog(schema: str):
+# --------------------------------------------------
+# queries
+# --------------------------------------------------
+
+def get_operations_catalog(schema: str | None = None):
+    schema = schema or DB_SCHEMA
     operation_tbl = _qualify(schema, "operation", "o")
 
     sql = f"""
@@ -182,7 +159,8 @@ def get_operations_catalog(schema: str):
     return _fetchall(sql)
 
 
-def get_routes_for_day(schema: str, date_yyyymmdd: int):
+def get_routes_for_day(schema: str | None, date_yyyymmdd: int):
+    schema = schema or DB_SCHEMA
     start = int(f"{date_yyyymmdd}0000")
     end = int(f"{date_yyyymmdd}2359")
 
@@ -198,16 +176,12 @@ def get_routes_for_day(schema: str, date_yyyymmdd: int):
       r.routeSeq,
       r.operationID,
       r.vehicleID,
-
       {cast_origin} AS originDeptTime,
       {cast_dest} AS destArrivalTime,
-
       r.dispatchIDs,
-
       o.VehicleType AS vehicleType,
       o.operationServiceType,
       o.vehicleID AS op_vehicleID
-
     FROM {route_tbl}
     JOIN {operation_tbl}
       ON o.operationID = r.operationID
@@ -218,7 +192,8 @@ def get_routes_for_day(schema: str, date_yyyymmdd: int):
     return _fetchall(sql, [start, end])
 
 
-def get_reservations_by_dispatch_ids(schema: str, dispatch_ids: list[str]):
+def get_reservations_by_dispatch_ids(schema: str | None, dispatch_ids: list[str]):
+    schema = schema or DB_SCHEMA
     if not dispatch_ids:
         return []
 
@@ -251,7 +226,8 @@ def get_reservations_by_dispatch_ids(schema: str, dispatch_ids: list[str]):
     return _fetchall(sql, cleaned)
 
 
-def get_dispatches_by_dispatch_ids(schema: str, dispatch_ids: list[str]):
+def get_dispatches_by_dispatch_ids(schema: str | None, dispatch_ids: list[str]):
+    schema = schema or DB_SCHEMA
     if not dispatch_ids:
         return []
 
@@ -273,10 +249,10 @@ def get_dispatches_by_dispatch_ids(schema: str, dispatch_ids: list[str]):
     sql = f"""
     SELECT
       d.dispatchID,
-      d.pickupStationName,
-      d.dropoffStationName,
       d.pickupStationID,
+      d.pickupStationName,
       d.dropoffStationID,
+      d.dropoffStationName,
       d.reserveType
     FROM {dispatch_tbl}
     WHERE d.dispatchID IN ({placeholders})
