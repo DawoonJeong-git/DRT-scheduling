@@ -55,3 +55,25 @@ def api_gantt():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", os.getenv("FLASK_PORT", "5056")))
     app.run(host="0.0.0.0", port=port)
+
+
+    import socket
+from flask import jsonify
+
+@app.route("/api/socket-check")
+def socket_check():
+    host = "143.248.121.90"
+    port = 3306
+    try:
+        socket.create_connection((host, port), timeout=5)
+        return jsonify({
+            "ok": True,
+            "message": f"TCP reachable: {host}:{port}"
+        })
+    except Exception as e:
+        return jsonify({
+            "ok": False,
+            "message": f"TCP failed: {repr(e)}",
+            "host": host,
+            "port": port
+        }), 500
