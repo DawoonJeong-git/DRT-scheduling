@@ -10,6 +10,4 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY . /app
 
-WORKDIR /app/server
-
-CMD gunicorn app:app --bind 0.0.0.0:$PORT
+CMD gunicorn server.app:app --bind 0.0.0.0:$PORT
