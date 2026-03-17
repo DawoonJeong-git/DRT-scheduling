@@ -1,19 +1,3 @@
-// src/api/ganttApi.js
-
-// API contract (expected):
-// {
-//   date: "YYYY-MM-DD",
-//   updatedAtMs: number,
-//   timeWindow: { start: "08:00", end: "22:00", stepMin: 5 },
-//   vehicles: [{ vehicleID, vehicleType, operationServiceType }],
-//   intervals: [
-//     {
-//       vehicleID, operationID, status, startMs, endMs, laneIndex, laneCount, label,
-//       pickupStationID, dropoffStationID, pickupStationName, dropoffStationName, reserveType
-//     }
-//   ]
-// }
-
 function normalizePayload(raw) {
   if (!raw || typeof raw !== "object") throw new Error("Invalid API response.");
 
@@ -40,7 +24,6 @@ function normalizePayload(raw) {
       laneIndex: Number.isFinite(it.laneIndex) ? it.laneIndex : 0,
       laneCount: Number.isFinite(it.laneCount) && it.laneCount > 0 ? it.laneCount : 1,
       label: it.label ?? "",
-
       reserveType: it.reserveType ?? "",
       pickupStationID: it.pickupStationID ?? "",
       dropoffStationID: it.dropoffStationID ?? "",
@@ -50,28 +33,17 @@ function normalizePayload(raw) {
   };
 }
 
-const API_BASE = import.meta.env.VITE_API_BASE || "";
+const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/$/, "");
 
 export async function fetchGantt(date, { signal } = {}) {
   const url = `${API_BASE}/api/gantt?date=${encodeURIComponent(date)}`;
+  const resp = await fetch(url, { method: "GET", signal });
 
-  try {
-    const resp = await fetch(url, { method: "GET", signal });
-
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => "");
-      throw new Error(`API error (${resp.status}): ${text || resp.statusText}`);
-    }
-
-    const json = await resp.json();
-    return normalizePayload(json);
-
-  } catch (e) {
-    // 개발 모드에서 발생하는 abort 요청은 무시
-    if (e.name === "AbortError") {
-      return null;
-    }
-
-    throw e;
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`API error (${resp.status}): ${text || resp.statusText}`);
   }
+
+  const json = await resp.json();
+  return normalizePayload(json);
 }

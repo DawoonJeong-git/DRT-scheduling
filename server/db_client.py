@@ -1,86 +1,31 @@
-# server/db_client.py
-
+from dotenv import load_dotenv
 import os
 import pymysql
+from contextlib import contextmanager
 from typing import Any
 
-# --------------------------------------------------
-# DB profile selection
-# --------------------------------------------------
+load_dotenv()
 
-PROFILE_NAME = "hdl"   # "nzero" or "hdl"
+DB_HOST = os.getenv("DB_HOST")
+DB_PORT = int(os.getenv("DB_PORT", "3306"))
+DB_USER = os.getenv("DB_USER")
+DB_PASS = os.getenv("DB_PASSWORD")
+DB_DATABASE = os.getenv("DB_NAME", "hdl")
 
-# --------------------------------------------------
-# Load config: local(db_config.py) first, then Render env fallback
-# --------------------------------------------------
+print(f"[DB INIT] host={DB_HOST}:{DB_PORT} db={DB_DATABASE}")
 
-DB = None
-
-try:
-    from db_config import DB_CONFIGS  # local only
-
-    if PROFILE_NAME in DB_CONFIGS:
-        DB = DB_CONFIGS[PROFILE_NAME]
-        print(f"[DB INIT] Using local db_config.py | PROFILE={PROFILE_NAME}")
-    else:
-        raise KeyError(f"PROFILE_NAME '{PROFILE_NAME}' not found in DB_CONFIGS")
-
-except Exception as e:
-    print(f"[DB INIT] Local db_config.py unavailable or invalid: {e}")
-    print(f"[DB INIT] Falling back to environment variables | PROFILE={PROFILE_NAME}")
-
-    # Render / deployment env fallback
-    if PROFILE_NAME == "nzero":
-        DB = {
-            "host": os.getenv("NZERO_DB_HOST"),
-            "port": int(os.getenv("NZERO_DB_PORT", "3306")),
-            "user": os.getenv("NZERO_DB_USER"),
-            "password": os.getenv("NZERO_DB_PASSWORD"),
-            "database": os.getenv("NZERO_DB_NAME"),
-            "charset": "utf8mb4",
-            "use_unicode": True,
-        }
-
-    elif PROFILE_NAME == "hdl":
-        DB = {
-            "host": os.getenv("HDL_DB_HOST"),
-            "port": int(os.getenv("HDL_DB_PORT", "3306")),
-            "user": os.getenv("HDL_DB_USER"),
-            "password": os.getenv("HDL_DB_PASSWORD"),
-            "database": os.getenv("HDL_DB_NAME"),
-            "charset": "utf8mb4",
-            "use_unicode": True,
-        }
-
-    else:
-        raise ValueError(f"Unsupported PROFILE_NAME: {PROFILE_NAME}")
-
-# --------------------------------------------------
-# Final DB vars
-# --------------------------------------------------
-
-DB_HOST = DB["host"]
-DB_PORT = DB["port"]
-DB_USER = DB["user"]
-DB_PASS = DB["password"]
-DB_DATABASE = DB["database"]
-DB_SCHEMA = DB_DATABASE
-
-if not all([DB_HOST, DB_PORT, DB_USER, DB_PASS, DB_DATABASE]):
-    raise ValueError(
-        f"[DB INIT ERROR] Missing DB config values for PROFILE={PROFILE_NAME}. "
-        f"Check db_config.py or Render environment variables."
-    )
-
-print(f"[DB INIT] PROFILE={PROFILE_NAME} | host={DB_HOST}:{DB_PORT} | db={DB_DATABASE}")
+required_env = {
+    "DB_HOST": DB_HOST,
+    "DB_USER": DB_USER,
+    "DB_PASSWORD": DB_PASS,
+    "DB_NAME": DB_DATABASE,
+}
+missing = [k for k, v in required_env.items() if not v]
+if missing:
+    raise RuntimeError(f"Missing required DB env vars: {', '.join(missing)}")
 
 
-# --------------------------------------------------
-# connection / fetch
-# --------------------------------------------------
-
-def _conn():
-    print(f"[DB] CONNECT -> MARIADB ({DB_HOST}:{DB_PORT} / {DB_DATABASE})")
+def get_connection():
     return pymysql.connect(
         host=DB_HOST,
         port=DB_PORT,
@@ -89,15 +34,23 @@ def _conn():
         database=DB_DATABASE,
         cursorclass=pymysql.cursors.DictCursor,
         autocommit=True,
-        charset=DB["charset"],
-        use_unicode=DB["use_unicode"],
+        charset="utf8mb4",
     )
+
+
+@contextmanager
+def connect():
+    print(f"[DB CONNECT] host={DB_HOST}:{DB_PORT} db={DB_DATABASE}")
+    conn = get_connection()
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def _fetchall(sql: str, params: list[Any] | tuple[Any, ...] | None = None):
     params = params or []
-
-    with _conn() as c:
+    with connect() as c:
         cur = c.cursor()
         try:
             cur.execute(sql, params)
@@ -106,9 +59,16 @@ def _fetchall(sql: str, params: list[Any] | tuple[Any, ...] | None = None):
             cur.close()
 
 
-# --------------------------------------------------
-# helpers
-# --------------------------------------------------
+def test_connection():
+    with connect() as c:
+        cur = c.cursor()
+        try:
+            cur.execute("SELECT 1 AS ok")
+            row = cur.fetchone()
+            return bool(row and row.get("ok") == 1)
+        finally:
+            cur.close()
+
 
 def _normalize_dispatch_id(x) -> str:
     if x is None:
@@ -135,18 +95,13 @@ def _cast_int(expr: str) -> str:
     return f"CAST({expr} AS UNSIGNED)"
 
 
-def _qualify(schema: str, table: str, alias: str | None = None) -> str:
+def _qualify(table: str, alias: str | None = None) -> str:
     alias_sql = f" {alias}" if alias else ""
-    return f"{schema}.{table}{alias_sql}"
+    return f"{DB_DATABASE}.{table}{alias_sql}"
 
 
-# --------------------------------------------------
-# queries
-# --------------------------------------------------
-
-def get_operations_catalog(schema: str | None = None):
-    schema = schema or DB_SCHEMA
-    operation_tbl = _qualify(schema, "operation", "o")
+def get_operations_catalog():
+    operation_tbl = _qualify("operation", "o")
 
     sql = f"""
     SELECT
@@ -159,13 +114,12 @@ def get_operations_catalog(schema: str | None = None):
     return _fetchall(sql)
 
 
-def get_routes_for_day(schema: str | None, date_yyyymmdd: int):
-    schema = schema or DB_SCHEMA
+def get_routes_for_day(date_yyyymmdd: int):
     start = int(f"{date_yyyymmdd}0000")
     end = int(f"{date_yyyymmdd}2359")
 
-    route_tbl = _qualify(schema, "route", "r")
-    operation_tbl = _qualify(schema, "operation", "o")
+    route_tbl = _qualify("route", "r")
+    operation_tbl = _qualify("operation", "o")
 
     cast_origin = _cast_int("r.originDeptTime")
     cast_dest = _cast_int("r.destArrivalTime")
@@ -192,8 +146,7 @@ def get_routes_for_day(schema: str | None, date_yyyymmdd: int):
     return _fetchall(sql, [start, end])
 
 
-def get_reservations_by_dispatch_ids(schema: str | None, dispatch_ids: list[str]):
-    schema = schema or DB_SCHEMA
+def get_reservations_by_dispatch_ids(dispatch_ids: list[str]):
     if not dispatch_ids:
         return []
 
@@ -209,7 +162,7 @@ def get_reservations_by_dispatch_ids(schema: str | None, dispatch_ids: list[str]
     if not cleaned:
         return []
 
-    reservation_tbl = _qualify(schema, "reservation_request", "rr")
+    reservation_tbl = _qualify("reservation_request", "rr")
     placeholders = _placeholders(len(cleaned))
 
     sql = f"""
@@ -226,8 +179,7 @@ def get_reservations_by_dispatch_ids(schema: str | None, dispatch_ids: list[str]
     return _fetchall(sql, cleaned)
 
 
-def get_dispatches_by_dispatch_ids(schema: str | None, dispatch_ids: list[str]):
-    schema = schema or DB_SCHEMA
+def get_dispatches_by_dispatch_ids(dispatch_ids: list[str]):
     if not dispatch_ids:
         return []
 
@@ -243,16 +195,16 @@ def get_dispatches_by_dispatch_ids(schema: str | None, dispatch_ids: list[str]):
     if not cleaned:
         return []
 
-    dispatch_tbl = _qualify(schema, "dispatch", "d")
+    dispatch_tbl = _qualify("dispatch", "d")
     placeholders = _placeholders(len(cleaned))
 
     sql = f"""
     SELECT
       d.dispatchID,
-      d.pickupStationID,
       d.pickupStationName,
-      d.dropoffStationID,
       d.dropoffStationName,
+      d.pickupStationID,
+      d.dropoffStationID,
       d.reserveType
     FROM {dispatch_tbl}
     WHERE d.dispatchID IN ({placeholders})

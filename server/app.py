@@ -1,42 +1,25 @@
-# server/app.py
-import os
-from pathlib import Path
-import socket
-from dotenv import load_dotenv
-from flask import Flask, jsonify, request
+from flask import Flask, request, jsonify
 from flask_cors import CORS
+from dotenv import load_dotenv
+import os
 
-BASE_DIR = Path(__file__).resolve().parent
+from .gantt_builder import build_gantt_payload
+from .db_client import test_connection
 
-# backend env 먼저 로드
-load_dotenv(BASE_DIR / ".env", override=True)
-
-# 필요 시 루트 env 추가 로드
-load_dotenv(BASE_DIR.parent / ".env", override=False)
-
-print("\n=== ENV CHECK ===")
-print("PORT =", os.getenv("PORT"))
-print("FLASK_PORT =", os.getenv("FLASK_PORT"))
-print("CORS_ALLOWED_ORIGINS =", os.getenv("CORS_ALLOWED_ORIGINS"))
-print("=================\n")
-
-# env 로드가 끝난 뒤 import
-from gantt_builder import build_gantt_payload
+load_dotenv()
 
 app = Flask(__name__)
-
-cors_origins_raw = os.getenv("CORS_ALLOWED_ORIGINS", "*").strip()
-
-if cors_origins_raw == "*" or not cors_origins_raw:
-    CORS(app)
-else:
-    cors_origins = [x.strip() for x in cors_origins_raw.split(",") if x.strip()]
-    CORS(app, origins=cors_origins)
+CORS(app)
 
 
 @app.get("/health")
+@app.get("/api/health")
 def health():
-    return jsonify({"ok": True})
+    try:
+        db_ok = test_connection()
+        return jsonify({"ok": True, "db": db_ok})
+    except Exception as e:
+        return jsonify({"ok": False, "db": False, "error": str(e)}), 500
 
 
 @app.get("/api/gantt")
@@ -45,34 +28,10 @@ def api_gantt():
     if not date:
         return jsonify({"error": "Missing required query param: date=YYYY-MM-DD"}), 400
 
-    try:
-        payload = build_gantt_payload(date)
-        return jsonify(payload)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    payload = build_gantt_payload(date)
+    return jsonify(payload)
 
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", os.getenv("FLASK_PORT", "5056")))
-    app.run(host="0.0.0.0", port=port)
-
-
-
-
-@app.route("/api/socket-check")
-def socket_check():
-    host = "143.248.121.90"
-    port = 3306
-    try:
-        socket.create_connection((host, port), timeout=5)
-        return jsonify({
-            "ok": True,
-            "message": f"TCP reachable: {host}:{port}"
-        })
-    except Exception as e:
-        return jsonify({
-            "ok": False,
-            "message": f"TCP failed: {repr(e)}",
-            "host": host,
-            "port": port
-        }), 500
+    port = int(os.getenv("PORT", "5056"))
+    app.run(host="0.0.0.0", port=port, debug=False)

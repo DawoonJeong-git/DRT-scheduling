@@ -1,9 +1,8 @@
 # server/gantt_builder.py
-import os
 import json
 from datetime import datetime, timezone, timedelta
 
-from db_client import (
+from .db_client import (
     get_routes_for_day,
     get_operations_catalog,
     get_reservations_by_dispatch_ids,
@@ -153,12 +152,6 @@ def _label_for(vehicle_type: str, general: int, wheelchair: int):
 
 
 def _pick_dispatch_info(dispatch_rows, rr_rows):
-    """
-    dispatch 테이블 우선:
-      - pickupStationName/dropoffStationName 있음
-      - reserveType 있음
-    reservation_request는 예비(혹시 dispatch row가 없을 때 ID/reserveType만이라도)
-    """
     def first_nonempty_from(rows, key):
         for r in rows:
             v = r.get(key)
@@ -169,14 +162,12 @@ def _pick_dispatch_info(dispatch_rows, rr_rows):
                 return s
         return ""
 
-    # dispatch 우선
     pickupStationName = first_nonempty_from(dispatch_rows, "pickupStationName")
     dropoffStationName = first_nonempty_from(dispatch_rows, "dropoffStationName")
     pickupStationID = first_nonempty_from(dispatch_rows, "pickupStationID")
     dropoffStationID = first_nonempty_from(dispatch_rows, "dropoffStationID")
     reserveType = first_nonempty_from(dispatch_rows, "reserveType")
 
-    # fallback to reservation_request if still empty
     if not reserveType:
         reserveType = first_nonempty_from(rr_rows, "reserveType")
     if not pickupStationID:
@@ -279,7 +270,7 @@ def _connected_components_overlaps(items):
 
 
 def _build_operations(routes, route_dispatch_map, rr_by_dispatch, dispatch_by_dispatch, win_start, win_end):
-    ops = {}  # (vehicleID, operationID) -> dict
+    ops = {}
 
     for idx, r in enumerate(routes):
         vehicle_id = str(r.get("vehicleID") or r.get("op_vehicleID") or "").strip()
@@ -308,8 +299,8 @@ def _build_operations(routes, route_dispatch_map, rr_by_dispatch, dispatch_by_di
                 "vehicleType": (r.get("vehicleType") or "").strip(),
                 "total_s": s,
                 "total_e": e,
-                "svc_segments": [],  # (s,e,label)
-                "mov_segments": [],  # (s,e)
+                "svc_segments": [],
+                "mov_segments": [],
             }
         else:
             ops[key]["total_s"] = min(ops[key]["total_s"], s)
@@ -318,7 +309,6 @@ def _build_operations(routes, route_dispatch_map, rr_by_dispatch, dispatch_by_di
         if _has_dispatch(r.get("dispatchIDs")):
             dispatch_ids = route_dispatch_map[idx]
 
-            # passenger label은 reservation_request로
             merged_rr = []
             merged_dispatch = []
             for did in dispatch_ids:
@@ -331,7 +321,6 @@ def _build_operations(routes, route_dispatch_map, rr_by_dispatch, dispatch_by_di
 
             dinfo = _pick_dispatch_info(merged_dispatch, merged_rr)
 
-            # pooling에서도 비어있는 dinfo로 고정되지 않게: "값이 있으면 갱신"
             prev = ops[key].get("dispatch_info") or {}
             prev_has = any(str(prev.get(k, "")).strip() for k in dinfo.keys())
             new_has = any(str(dinfo.get(k, "")).strip() for k in dinfo.keys())
@@ -402,12 +391,10 @@ def _assign_fixed_lanes_for_spans(spans):
 
 
 def build_gantt_payload(date_str: str):
-    from db_client import DB_SCHEMA
-    schema = DB_SCHEMA
     date_yyyymmdd = _date_to_yyyymmdd(date_str)
     win_start, win_end = _day_window_ms(date_str)
 
-    ops_catalog = get_operations_catalog(schema)
+    ops_catalog = get_operations_catalog()
     vehicles = []
     seen = set()
     for o in ops_catalog:
@@ -424,7 +411,7 @@ def build_gantt_payload(date_str: str):
         )
     vehicles.sort(key=lambda x: x["vehicleID"])
 
-    routes = get_routes_for_day(schema, date_yyyymmdd)
+    routes = get_routes_for_day(date_yyyymmdd)
 
     all_dispatch_ids = []
     route_dispatch_map = []
@@ -436,7 +423,6 @@ def build_gantt_payload(date_str: str):
         route_dispatch_map.append(dlist)
         all_dispatch_ids.extend(dlist)
 
-    # normalize + unique
     uniq_dispatch = []
     seen_d = set()
     for did in all_dispatch_ids:
@@ -446,24 +432,28 @@ def build_gantt_payload(date_str: str):
         seen_d.add(nd)
         uniq_dispatch.append(nd)
 
-    # 1) reservation_request rows (passengers)
-    rr_rows = get_reservations_by_dispatch_ids(schema, uniq_dispatch)
+    rr_rows = get_reservations_by_dispatch_ids(uniq_dispatch)
     rr_by_dispatch = {}
     for rr in rr_rows:
         did = _normalize_dispatch_id(rr.get("dispatchID"))
         if did:
             rr_by_dispatch.setdefault(did, []).append(rr)
 
-    # 2) dispatch rows (station names + reserveType)
-    d_rows = get_dispatches_by_dispatch_ids(schema, uniq_dispatch)
+    d_rows = get_dispatches_by_dispatch_ids(uniq_dispatch)
     dispatch_by_dispatch = {}
     for dr in d_rows:
         did = _normalize_dispatch_id(dr.get("dispatchID"))
         if did:
             dispatch_by_dispatch.setdefault(did, []).append(dr)
 
-    # operations
-    op_map = _build_operations(routes, route_dispatch_map, rr_by_dispatch, dispatch_by_dispatch, win_start, win_end)
+    op_map = _build_operations(
+        routes,
+        route_dispatch_map,
+        rr_by_dispatch,
+        dispatch_by_dispatch,
+        win_start,
+        win_end,
+    )
 
     ops_by_vehicle = {}
     for (vid, opid), d in op_map.items():
@@ -495,7 +485,6 @@ def build_gantt_payload(date_str: str):
                 moving_no_overlap.extend(_subtract_merged(ms, me, drive_inservice_merged))
             drive_moving_merged = _merge_intervals(moving_no_overlap)
 
-            # MOVING
             for s, e in drive_moving_merged:
                 intervals.append(
                     {
@@ -510,7 +499,6 @@ def build_gantt_payload(date_str: str):
                     }
                 )
 
-            # BOARDING = drive range - (MOVING ∪ IN_SERVICE)
             occ = _merge_intervals(drive_inservice_merged + drive_moving_merged)
             boarding = _merge_intervals(_complement_in_range(drive_start, drive_end, occ))
             for s, e in boarding:
@@ -527,7 +515,6 @@ def build_gantt_payload(date_str: str):
                     }
                 )
 
-            # IN_SERVICE: one bar per operationID + fixed lanes
             spans = []
             for d in comp_ops:
                 span = _op_inservice_span(d)
@@ -558,8 +545,6 @@ def build_gantt_payload(date_str: str):
                         "laneIndex": it["laneIndex"],
                         "laneCount": it["laneCount"],
                         "label": it["label"],
-
-                        # ✅ tooltip fields (from dispatch table)
                         "pickupStationName": dinfo.get("pickupStationName", ""),
                         "dropoffStationName": dinfo.get("dropoffStationName", ""),
                         "pickupStationID": dinfo.get("pickupStationID", ""),
@@ -568,7 +553,6 @@ def build_gantt_payload(date_str: str):
                     }
                 )
 
-    # AVAILABLE: day window - union(all drive ranges)
     for v in vehicles:
         vid = v["vehicleID"]
         drives = _merge_intervals(drive_ranges_by_vehicle.get(vid, []))
@@ -604,5 +588,3 @@ def build_gantt_payload(date_str: str):
             "ops": len(op_map),
         },
     }
-
-
