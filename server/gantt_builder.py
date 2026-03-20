@@ -321,46 +321,46 @@ def _build_operations(routes, route_dispatch_map, rr_by_dispatch, dispatch_by_di
 
             dinfo = _pick_dispatch_info(merged_dispatch, merged_rr)
 
-            prev = ops[key].get("dispatch_info") or {}
-            prev_has = any(str(prev.get(k, "")).strip() for k in dinfo.keys())
-            new_has = any(str(dinfo.get(k, "")).strip() for k in dinfo.keys())
-
-            if (not prev_has) and new_has:
-                ops[key]["dispatch_info"] = dinfo
-            else:
-                ops[key].setdefault("dispatch_info", dinfo)
-
-            ops[key]["svc_segments"].append((s, e, label))
+            ops[key]["svc_segments"].append(
+                {
+                    "startMs": s,
+                    "endMs": e,
+                    "label": label,
+                    "dispatch_info": dinfo,
+                    "dispatchIDs": dispatch_ids,
+                }
+            )
         else:
             ops[key]["mov_segments"].append((s, e))
 
     for _, d in ops.items():
-        d["svc_merged"] = _merge_intervals([(s, e) for s, e, _ in d["svc_segments"]])
-        d["mov_merged"] = _merge_intervals(d["mov_segments"])
-        d["label_rep"] = d["svc_segments"][0][2] if d["svc_segments"] else ""
-        d.setdefault(
-            "dispatch_info",
-            {
-                "pickupStationName": "",
-                "dropoffStationName": "",
-                "pickupStationID": "",
-                "dropoffStationID": "",
-                "reserveType": "",
-            },
+        d["svc_merged"] = _merge_intervals(
+            [(seg["startMs"], seg["endMs"]) for seg in d["svc_segments"]]
         )
+        d["mov_merged"] = _merge_intervals(d["mov_segments"])
 
     return ops
 
 
-def _op_inservice_span(d):
-    svc = d.get("svc_merged") or []
-    if not svc:
-        return None
-    s = min(x[0] for x in svc)
-    e = max(x[1] for x in svc)
-    if e <= s:
-        return None
-    return (s, e)
+def _build_inservice_spans(comp_ops, vid):
+    spans = []
+    for d in comp_ops:
+        for idx, seg in enumerate(d.get("svc_segments") or []):
+            s = seg.get("startMs")
+            e = seg.get("endMs")
+            if not s or not e or e <= s:
+                continue
+            spans.append(
+                {
+                    "opKey": (vid, d["operationID"]),
+                    "segmentKey": (vid, d["operationID"], idx, s, e),
+                    "s": s,
+                    "e": e,
+                    "label": seg.get("label") or "",
+                    "dispatch_info": seg.get("dispatch_info") or {},
+                }
+            )
+    return spans
 
 
 def _assign_fixed_lanes_for_spans(spans):
@@ -515,22 +515,7 @@ def build_gantt_payload(date_str: str):
                     }
                 )
 
-            spans = []
-            for d in comp_ops:
-                span = _op_inservice_span(d)
-                if not span:
-                    continue
-                s, e = span
-                spans.append(
-                    {
-                        "opKey": (vid, d["operationID"]),
-                        "s": s,
-                        "e": e,
-                        "label": d.get("label_rep") or "",
-                        "dispatch_info": d.get("dispatch_info") or {},
-                    }
-                )
-
+            spans = _build_inservice_spans(comp_ops, vid)
             spans = _assign_fixed_lanes_for_spans(spans)
             for it in spans:
                 opid = it["opKey"][1]
