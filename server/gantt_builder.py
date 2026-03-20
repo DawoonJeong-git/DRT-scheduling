@@ -13,6 +13,7 @@ KST = timezone(timedelta(hours=9))
 
 START_HOUR = 8
 END_HOUR = 22
+MINUTE_MS = 60_000
 
 
 def _date_to_yyyymmdd(date_str: str) -> int:
@@ -34,6 +35,7 @@ def _to_epoch_ms(x):
     s = str(x).strip()
     if s == "" or s.lower() == "null":
         return None
+
     s2 = "".join(ch for ch in s if ch.isdigit())
     if s2 == "":
         return None
@@ -140,6 +142,7 @@ def _sum_passengers(res_rows):
             w = 0
         total_p += p
         total_w += w
+
     general = max(0, total_p - total_w)
     return general, total_w
 
@@ -187,6 +190,7 @@ def _pick_dispatch_info(dispatch_rows, rr_rows):
 def _merge_intervals(intervals):
     xs = [(s, e) for s, e in intervals if e > s]
     xs.sort(key=lambda t: (t[0], t[1]))
+
     merged = []
     cur_s = cur_e = None
     for s, e in xs:
@@ -198,43 +202,10 @@ def _merge_intervals(intervals):
         else:
             merged.append((cur_s, cur_e))
             cur_s, cur_e = s, e
+
     if cur_s is not None:
         merged.append((cur_s, cur_e))
     return merged
-
-
-def _complement_in_range(range_s, range_e, occ_merged):
-    gaps = []
-    cur = range_s
-    for s, e in occ_merged:
-        s = max(range_s, s)
-        e = min(range_e, e)
-        if e <= range_s or s >= range_e:
-            continue
-        if s > cur:
-            gaps.append((cur, s))
-        cur = max(cur, e)
-    if cur < range_e:
-        gaps.append((cur, range_e))
-    return [(s, e) for s, e in gaps if e > s]
-
-
-def _subtract_merged(base_s, base_e, cut_merged):
-    pieces = [(base_s, base_e)]
-    for cs, ce in cut_merged:
-        new_p = []
-        for ps, pe in pieces:
-            if pe <= cs or ps >= ce:
-                new_p.append((ps, pe))
-                continue
-            if ps < cs:
-                new_p.append((ps, cs))
-            if pe > ce:
-                new_p.append((ce, pe))
-        pieces = new_p
-        if not pieces:
-            break
-    return [(s, e) for s, e in pieces if e > s]
 
 
 def _intervals_overlap(a_s, a_e, b_s, b_e):
@@ -267,6 +238,76 @@ def _connected_components_overlaps(items):
                     stack.append(v)
         comps.append(comp)
     return comps
+
+
+def _minute_floor(ms: int) -> int:
+    return (ms // MINUTE_MS) * MINUTE_MS
+
+
+def _minute_cells_covered(start_ms: int, end_ms: int):
+    if end_ms <= start_ms:
+        return []
+    start_cell = _minute_floor(start_ms)
+    end_cell = _minute_floor(end_ms - 1)
+    return list(range(start_cell, end_cell + MINUTE_MS, MINUTE_MS))
+
+
+def _is_single_minute_interval(start_ms: int, end_ms: int) -> bool:
+    return len(_minute_cells_covered(start_ms, end_ms)) == 1
+
+
+def _overlap_ms_with_cell(start_ms: int, end_ms: int, cell_ms: int) -> int:
+    cell_end = cell_ms + MINUTE_MS
+    return max(0, min(end_ms, cell_end) - max(start_ms, cell_ms))
+
+
+def _best_candidate_by_overlap(cands, cell_ms):
+    if not cands:
+        return None
+    return max(
+        cands,
+        key=lambda c: (
+            _overlap_ms_with_cell(c["startMs"], c["endMs"], cell_ms),
+            c["endMs"] - c["startMs"],
+        ),
+    )
+
+
+def _resolve_cell_status(candidates, cell_ms):
+    """
+    규칙:
+    1) 한 셀에는 최종 1개 상태만 남긴다.
+    2) 기본 우선순위: IN_SERVICE > MOVING
+    3) 단, MOVING이 '1분짜리 interval'이고 IN_SERVICE는 다분 interval이면 MOVING 보호
+    4) 단, IN_SERVICE와 MOVING이 둘 다 같은 1분 내 완료(single-minute interval)면 IN_SERVICE만 표출
+    """
+    in_cands = [c for c in candidates if c["status"] == "IN_SERVICE"]
+    mv_cands = [c for c in candidates if c["status"] == "MOVING"]
+
+    if in_cands and not mv_cands:
+        return _best_candidate_by_overlap(in_cands, cell_ms)
+
+    if mv_cands and not in_cands:
+        return _best_candidate_by_overlap(mv_cands, cell_ms)
+
+    if in_cands and mv_cands:
+        in_single = any(c["singleMinute"] for c in in_cands)
+        mv_single = any(c["singleMinute"] for c in mv_cands)
+        in_multi = any(not c["singleMinute"] for c in in_cands)
+        mv_multi = any(not c["singleMinute"] for c in mv_cands)
+
+        # 둘 다 같은 1분 안 완료 -> IN_SERVICE만 표출
+        if in_single and mv_single and not in_multi and not mv_multi:
+            return _best_candidate_by_overlap(in_cands, cell_ms)
+
+        # MOVING만 1분짜리이고 IN_SERVICE는 다분 구간 -> MOVING 보호
+        if mv_single and in_multi:
+            return _best_candidate_by_overlap(mv_cands, cell_ms)
+
+        # 나머지는 기본 우선순위
+        return _best_candidate_by_overlap(in_cands, cell_ms)
+
+    return None
 
 
 def _build_operations(routes, route_dispatch_map, rr_by_dispatch, dispatch_by_dispatch, win_start, win_end):
@@ -318,7 +359,6 @@ def _build_operations(routes, route_dispatch_map, rr_by_dispatch, dispatch_by_di
 
             general, wheelchair = _sum_passengers(merged_rr)
             label = _label_for(ops[key]["vehicleType"], general, wheelchair)
-
             dinfo = _pick_dispatch_info(merged_dispatch, merged_rr)
 
             ops[key]["svc_segments"].append(
@@ -328,66 +368,186 @@ def _build_operations(routes, route_dispatch_map, rr_by_dispatch, dispatch_by_di
                     "label": label,
                     "dispatch_info": dinfo,
                     "dispatchIDs": dispatch_ids,
+                    "sourceKey": f"{vehicle_id}|{op_id}|svc|{len(ops[key]['svc_segments'])}",
                 }
             )
         else:
-            ops[key]["mov_segments"].append((s, e))
-
-    for _, d in ops.items():
-        d["svc_merged"] = _merge_intervals(
-            [(seg["startMs"], seg["endMs"]) for seg in d["svc_segments"]]
-        )
-        d["mov_merged"] = _merge_intervals(d["mov_segments"])
+            ops[key]["mov_segments"].append(
+                {
+                    "startMs": s,
+                    "endMs": e,
+                    "sourceKey": f"{vehicle_id}|{op_id}|mov|{len(ops[key]['mov_segments'])}",
+                }
+            )
 
     return ops
 
 
-def _build_inservice_spans(comp_ops, vid):
-    spans = []
+def _append_interval_from_cells(intervals, vehicle_id, status, start_cell, end_cell_exclusive, meta=None):
+    if end_cell_exclusive <= start_cell:
+        return
+
+    meta = meta or {}
+    item = {
+        "vehicleID": vehicle_id,
+        "operationID": meta.get("operationID"),
+        "status": status,
+        "startMs": start_cell,
+        "endMs": end_cell_exclusive,
+        "laneIndex": 0,
+        "laneCount": 1,
+        "label": meta.get("label", ""),
+    }
+
+    if status == "IN_SERVICE":
+        dinfo = meta.get("dispatch_info") or {}
+        item.update(
+            {
+                "pickupStationName": dinfo.get("pickupStationName", ""),
+                "dropoffStationName": dinfo.get("dropoffStationName", ""),
+                "pickupStationID": dinfo.get("pickupStationID", ""),
+                "dropoffStationID": dinfo.get("dropoffStationID", ""),
+                "reserveType": dinfo.get("reserveType", ""),
+            }
+        )
+
+    intervals.append(item)
+
+
+def _build_component_cell_map(vehicle_id, comp_ops, drive_start, drive_end):
+    """
+    1) raw IN_SERVICE / MOVING interval을 minute cell로 펼침
+    2) 같은 셀에서 충돌 해소
+    3) drive range 내 비어 있는 셀은 BOARDING
+    """
+    cell_candidates = {}
+
     for d in comp_ops:
-        for idx, seg in enumerate(d.get("svc_segments") or []):
-            s = seg.get("startMs")
-            e = seg.get("endMs")
-            if not s or not e or e <= s:
-                continue
-            spans.append(
-                {
-                    "opKey": (vid, d["operationID"]),
-                    "segmentKey": (vid, d["operationID"], idx, s, e),
-                    "s": s,
-                    "e": e,
-                    "label": seg.get("label") or "",
-                    "dispatch_info": seg.get("dispatch_info") or {},
-                }
-            )
-    return spans
+        op_id = d["operationID"]
 
+        for seg in d.get("svc_segments", []):
+            s = seg["startMs"]
+            e = seg["endMs"]
+            single = _is_single_minute_interval(s, e)
+            for cell in _minute_cells_covered(s, e):
+                cell_candidates.setdefault(cell, []).append(
+                    {
+                        "status": "IN_SERVICE",
+                        "startMs": s,
+                        "endMs": e,
+                        "singleMinute": single,
+                        "sourceKey": seg["sourceKey"],
+                        "operationID": op_id,
+                        "label": seg.get("label", ""),
+                        "dispatch_info": seg.get("dispatch_info", {}),
+                    }
+                )
 
-def _assign_fixed_lanes_for_spans(spans):
-    spans = [x for x in spans if x["e"] > x["s"]]
-    spans.sort(key=lambda x: (x["s"], x["e"]))
+        for seg in d.get("mov_segments", []):
+            s = seg["startMs"]
+            e = seg["endMs"]
+            single = _is_single_minute_interval(s, e)
+            for cell in _minute_cells_covered(s, e):
+                cell_candidates.setdefault(cell, []).append(
+                    {
+                        "status": "MOVING",
+                        "startMs": s,
+                        "endMs": e,
+                        "singleMinute": single,
+                        "sourceKey": seg["sourceKey"],
+                        "operationID": op_id,
+                        "label": "",
+                    }
+                )
 
-    lanes_end = []
-    for it in spans:
-        s, e = it["s"], it["e"]
-        best_lane = None
-        best_end = None
-        for li, lend in enumerate(lanes_end):
-            if lend <= s:
-                if best_end is None or lend < best_end:
-                    best_end = lend
-                    best_lane = li
-        if best_lane is None:
-            best_lane = len(lanes_end)
-            lanes_end.append(e)
+    resolved = {}
+    drive_cells = _minute_cells_covered(drive_start, drive_end)
+
+    for cell in drive_cells:
+        cands = cell_candidates.get(cell, [])
+        chosen = _resolve_cell_status(cands, cell) if cands else None
+
+        if chosen is not None:
+            resolved[cell] = {
+                "status": chosen["status"],
+                "meta": {
+                    "operationID": chosen.get("operationID"),
+                    "label": chosen.get("label", ""),
+                    "dispatch_info": chosen.get("dispatch_info", {}),
+                    "sourceKey": chosen.get("sourceKey"),
+                },
+            }
         else:
-            lanes_end[best_lane] = e
-        it["laneIndex"] = best_lane
+            resolved[cell] = {
+                "status": "BOARDING",
+                "meta": {
+                    "operationID": None,
+                    "label": "",
+                    "sourceKey": f"{vehicle_id}|boarding",
+                },
+            }
 
-    lane_count = max(1, len(lanes_end))
-    for it in spans:
-        it["laneCount"] = lane_count
-    return spans
+    return resolved
+
+
+def _cells_to_intervals(vehicle_id, resolved_cells):
+    """
+    minute cell 결과를 연속 interval로 재구성.
+    IN_SERVICE는 sourceKey가 같을 때만 merge.
+    MOVING / BOARDING / AVAILABLE은 status 같으면 merge.
+    """
+    intervals = []
+    if not resolved_cells:
+        return intervals
+
+    cells = sorted(resolved_cells.keys())
+    cur_start = None
+    cur_end = None
+    cur_status = None
+    cur_meta = None
+    cur_group_key = None
+
+    def flush():
+        if cur_start is None:
+            return
+        _append_interval_from_cells(
+            intervals=intervals,
+            vehicle_id=vehicle_id,
+            status=cur_status,
+            start_cell=cur_start,
+            end_cell_exclusive=cur_end,
+            meta=cur_meta,
+        )
+
+    for cell in cells:
+        status = resolved_cells[cell]["status"]
+        meta = resolved_cells[cell]["meta"]
+
+        if status == "IN_SERVICE":
+            group_key = ("IN_SERVICE", meta.get("sourceKey"))
+        else:
+            group_key = (status, None)
+
+        if cur_start is None:
+            cur_start = cell
+            cur_end = cell + MINUTE_MS
+            cur_status = status
+            cur_meta = meta
+            cur_group_key = group_key
+            continue
+
+        if cell == cur_end and group_key == cur_group_key:
+            cur_end = cell + MINUTE_MS
+        else:
+            flush()
+            cur_start = cell
+            cur_end = cell + MINUTE_MS
+            cur_status = status
+            cur_meta = meta
+            cur_group_key = group_key
+
+    flush()
+    return intervals
 
 
 def build_gantt_payload(date_str: str):
@@ -456,105 +616,48 @@ def build_gantt_payload(date_str: str):
     )
 
     ops_by_vehicle = {}
-    for (vid, opid), d in op_map.items():
+    for (vid, _opid), d in op_map.items():
         ops_by_vehicle.setdefault(vid, []).append(d)
 
     intervals = []
-    drive_ranges_by_vehicle = {v["vehicleID"]: [] for v in vehicles}
 
     for v in vehicles:
         vid = v["vehicleID"]
         op_list = ops_by_vehicle.get(vid, [])
-        if not op_list:
-            continue
 
-        items = [{"s": d["total_s"], "e": d["total_e"], "ref": d} for d in op_list]
-        comps = _connected_components_overlaps(items)
+        # vehicle 전체 minute-cell 결과
+        vehicle_cells = {}
 
-        for comp in comps:
-            comp_ops = [items[i]["ref"] for i in comp]
-            drive_start = min(d["total_s"] for d in comp_ops)
-            drive_end = max(d["total_e"] for d in comp_ops)
-            drive_ranges_by_vehicle[vid].append((drive_start, drive_end))
+        if op_list:
+            items = [{"s": d["total_s"], "e": d["total_e"], "ref": d} for d in op_list]
+            comps = _connected_components_overlaps(items)
 
-            drive_inservice_merged = _merge_intervals([iv for d in comp_ops for iv in d["svc_merged"]])
+            for comp in comps:
+                comp_ops = [items[i]["ref"] for i in comp]
+                drive_start = min(d["total_s"] for d in comp_ops)
+                drive_end = max(d["total_e"] for d in comp_ops)
 
-            drive_moving_merged = _merge_intervals([iv for d in comp_ops for iv in d["mov_merged"]])
-            moving_no_overlap = []
-            for ms, me in drive_moving_merged:
-                moving_no_overlap.extend(_subtract_merged(ms, me, drive_inservice_merged))
-            drive_moving_merged = _merge_intervals(moving_no_overlap)
-
-            for s, e in drive_moving_merged:
-                intervals.append(
-                    {
-                        "vehicleID": vid,
-                        "operationID": None,
-                        "status": "MOVING",
-                        "startMs": s,
-                        "endMs": e,
-                        "laneIndex": 0,
-                        "laneCount": 1,
-                        "label": "",
-                    }
+                comp_cells = _build_component_cell_map(
+                    vehicle_id=vid,
+                    comp_ops=comp_ops,
+                    drive_start=drive_start,
+                    drive_end=drive_end,
                 )
+                vehicle_cells.update(comp_cells)
 
-            occ = _merge_intervals(drive_inservice_merged + drive_moving_merged)
-            boarding = _merge_intervals(_complement_in_range(drive_start, drive_end, occ))
-            for s, e in boarding:
-                intervals.append(
-                    {
-                        "vehicleID": vid,
-                        "operationID": None,
-                        "status": "BOARDING",
-                        "startMs": s,
-                        "endMs": e,
-                        "laneIndex": 0,
-                        "laneCount": 1,
-                        "label": "",
-                    }
-                )
-
-            spans = _build_inservice_spans(comp_ops, vid)
-            spans = _assign_fixed_lanes_for_spans(spans)
-            for it in spans:
-                opid = it["opKey"][1]
-                dinfo = it.get("dispatch_info") or {}
-                intervals.append(
-                    {
-                        "vehicleID": vid,
-                        "operationID": opid,
-                        "status": "IN_SERVICE",
-                        "startMs": it["s"],
-                        "endMs": it["e"],
-                        "laneIndex": it["laneIndex"],
-                        "laneCount": it["laneCount"],
-                        "label": it["label"],
-                        "pickupStationName": dinfo.get("pickupStationName", ""),
-                        "dropoffStationName": dinfo.get("dropoffStationName", ""),
-                        "pickupStationID": dinfo.get("pickupStationID", ""),
-                        "dropoffStationID": dinfo.get("dropoffStationID", ""),
-                        "reserveType": dinfo.get("reserveType", ""),
-                    }
-                )
-
-    for v in vehicles:
-        vid = v["vehicleID"]
-        drives = _merge_intervals(drive_ranges_by_vehicle.get(vid, []))
-        gaps = _complement_in_range(win_start, win_end, drives)
-        for s, e in gaps:
-            intervals.append(
-                {
-                    "vehicleID": vid,
-                    "operationID": None,
+        # AVAILABLE 채우기: window 안에서 아직 배정 안 된 minute cell
+        for cell in _minute_cells_covered(win_start, win_end):
+            if cell not in vehicle_cells:
+                vehicle_cells[cell] = {
                     "status": "AVAILABLE",
-                    "startMs": s,
-                    "endMs": e,
-                    "laneIndex": 0,
-                    "laneCount": 1,
-                    "label": "",
+                    "meta": {
+                        "operationID": None,
+                        "label": "",
+                        "sourceKey": f"{vid}|available",
+                    },
                 }
-            )
+
+        intervals.extend(_cells_to_intervals(vid, vehicle_cells))
 
     intervals = [it for it in intervals if it["endMs"] > it["startMs"]]
 
