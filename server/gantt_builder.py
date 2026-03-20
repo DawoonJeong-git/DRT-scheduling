@@ -324,8 +324,18 @@ def _build_operations(routes, route_dispatch_map, rr_by_dispatch, dispatch_by_di
 
         s_raw = _to_epoch_ms(r.get("originDeptTime"))
         e_raw = _to_epoch_ms(r.get("destArrivalTime"))
-        if not s_raw or not e_raw or e_raw <= s_raw:
+
+        if not s_raw or not e_raw:
             continue
+
+        # 같은 분 내 이동(초 단위 이동이 분 단위 데이터로 들어온 경우) 보정
+        if e_raw <= s_raw:
+            if not _has_dispatch(r.get("dispatchIDs")):
+                e_raw = s_raw + MINUTE_MS
+            else:
+                continue
+
+           
 
         s = max(win_start, s_raw)
         e = min(win_end, e_raw)
