@@ -43,6 +43,7 @@ export default function GanttChart({ data, loading }) {
   const sidebarScrollRef = useRef(null);
   const hScrollRef = useRef(null);
   const vScrollRef = useRef(null);
+  const centeredDateRef = useRef("");
 
   const [scroll, setScroll] = useState({ x: 0, y: 0 });
   const scrollRef = useRef({ x: 0, y: 0 });
@@ -87,6 +88,13 @@ export default function GanttChart({ data, loading }) {
 
   const rowsHeight = vehicles.length * ROW_HEIGHT;
   const viewportHeight = Math.min(rowsHeight, MAX_VIEWPORT_HEIGHT);
+
+  function getCurrentKSTMinuteIndex() {
+    const now = new Date();
+    const kst = new Date(now.getTime() + 9 * 60 * 60 * 1000);
+    const minutesFromMidnight = kst.getUTCHours() * 60 + kst.getUTCMinutes();
+    return minutesFromMidnight - START_HOUR * 60;
+  }
 
   function getMaxScroll() {
     const vp = viewportRef.current;
@@ -177,6 +185,25 @@ export default function GanttChart({ data, loading }) {
     const sb = sidebarScrollRef.current;
     if (sb) sb.style.transform = `translateY(${-scroll.y}px)`;
   }, [scroll.y]);
+
+  useEffect(() => {
+    if (!data?.date) return;
+    if (centeredDateRef.current === data.date) return;
+
+    const id = requestAnimationFrame(() => {
+      const vp = viewportRef.current;
+      if (!vp) return;
+
+      const cw = Math.max(1, vp.clientWidth);
+      const targetX = getCurrentKSTMinuteIndex() * PIXELS_PER_MIN - cw / 2;
+
+      syncScroll({ x: targetX, y: scrollRef.current.y }, "initial-center");
+      centeredDateRef.current = data.date;
+    });
+
+    return () => cancelAnimationFrame(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data?.date, viewportHeight]);
 
   if (!data && loading) return <div className="placeholder">Loading…</div>;
   if (!data) return <div className="placeholder">No data.</div>;
