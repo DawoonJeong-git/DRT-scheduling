@@ -107,7 +107,7 @@ def get_operations_catalog():
     SELECT
       o.operationID,
       o.vehicleID,
-      o.VehicleType AS vehicleType,
+      o.vehicleType AS vehicleType,
       o.operationServiceType
     FROM {operation_tbl}
     """
@@ -123,6 +123,7 @@ def get_routes_for_day(date_yyyymmdd: int):
 
     cast_origin = _cast_int("r.originDeptTime")
     cast_dest = _cast_int("r.destArrivalTime")
+    cast_route_status = _cast_int("r.routeStatus")
 
     sql = f"""
     SELECT
@@ -132,8 +133,9 @@ def get_routes_for_day(date_yyyymmdd: int):
       r.vehicleID,
       {cast_origin} AS originDeptTime,
       {cast_dest} AS destArrivalTime,
+      r.routeStatus,
       r.dispatchIDs,
-      o.VehicleType AS vehicleType,
+      o.vehicleType AS vehicleType,
       o.operationServiceType,
       o.vehicleID AS op_vehicleID
     FROM {route_tbl}
@@ -141,6 +143,11 @@ def get_routes_for_day(date_yyyymmdd: int):
       ON o.operationID = r.operationID
      AND o.vehicleID   = r.vehicleID
     WHERE {cast_origin} BETWEEN {_placeholder()} AND {_placeholder()}
+      AND (
+        {cast_route_status} IS NULL
+        OR {cast_route_status} < 400
+        OR {cast_route_status} >= 500
+      )
     ORDER BY r.operationID, r.routeSeq
     """
     return _fetchall(sql, [start, end])
