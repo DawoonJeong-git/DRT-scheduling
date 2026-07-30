@@ -95,6 +95,10 @@ def _cast_int(expr: str) -> str:
     return f"CAST({expr} AS UNSIGNED)"
 
 
+def _cast_nullable_int(expr: str) -> str:
+    return _cast_int(f"NULLIF(TRIM({expr}), '')")
+
+
 def _qualify(table: str, alias: str | None = None) -> str:
     alias_sql = f" {alias}" if alias else ""
     return f"{DB_DATABASE}.{table}{alias_sql}"
@@ -102,14 +106,18 @@ def _qualify(table: str, alias: str | None = None) -> str:
 
 def get_operations_catalog():
     operation_tbl = _qualify("operation", "o")
+    cast_operation_status = _cast_nullable_int("o.operationStatus")
 
     sql = f"""
     SELECT
       o.operationID,
       o.vehicleID,
       o.vehicleType AS vehicleType,
-      o.operationServiceType
+      o.operationServiceType,
+      o.operationStatus
     FROM {operation_tbl}
+    WHERE {cast_operation_status} IS NULL
+       OR {cast_operation_status} <> 4
     """
     return _fetchall(sql)
 
@@ -121,20 +129,34 @@ def get_routes_for_day(date_yyyymmdd: int):
     route_tbl = _qualify("route", "r")
     operation_tbl = _qualify("operation", "o")
 
-    cast_origin = _cast_int("r.originDeptTime")
-    cast_dest = _cast_int("r.destArrivalTime")
-    cast_route_status = _cast_int("r.routeStatus")
+    cast_origin = _cast_nullable_int("r.originDeptTime")
+    cast_dest = _cast_nullable_int("r.destArrivalTime")
+    cast_route_status = _cast_nullable_int("r.routeStatus")
+    cast_operation_status = _cast_nullable_int("o.operationStatus")
 
     sql = f"""
     SELECT
       r.routeID,
       r.routeSeq,
+      r.routeInfo,
       r.operationID,
       r.vehicleID,
+      r.originStationID,
+      r.destStationID,
       {cast_origin} AS originDeptTime,
       {cast_dest} AS destArrivalTime,
       r.routeStatus,
+      o.operationStatus,
       r.dispatchIDs,
+      r.linkIDs,
+      r.updatedLinkIDs,
+      r.NodeIDs,
+      r.updatedNodeIDs,
+      r.lon,
+      r.updatedLon,
+      r.lat,
+      r.updatedLat,
+      r.StationIDs,
       o.vehicleType AS vehicleType,
       o.operationServiceType,
       o.vehicleID AS op_vehicleID
@@ -145,8 +167,14 @@ def get_routes_for_day(date_yyyymmdd: int):
     WHERE {cast_origin} BETWEEN {_placeholder()} AND {_placeholder()}
       AND (
         {cast_route_status} IS NULL
-        OR {cast_route_status} < 400
-        OR {cast_route_status} >= 500
+        OR (
+          {cast_route_status} <> 4
+          AND NOT ({cast_route_status} >= 400 AND {cast_route_status} < 500)
+        )
+      )
+      AND (
+        {cast_operation_status} IS NULL
+        OR {cast_operation_status} <> 4
       )
     ORDER BY r.operationID, r.routeSeq
     """

@@ -12,7 +12,8 @@ function normalizePayload(raw) {
     vehicles: vehicles.map((v) => ({
       vehicleID: String(v.vehicleID ?? ""),
       vehicleType: v.vehicleType ?? "",
-      operationServiceType: v.operationServiceType ?? ""
+      operationServiceType: v.operationServiceType ?? "",
+      operationStatus: v.operationStatus ?? null
     })),
 
     intervals: intervals.map((it) => ({
@@ -24,6 +25,8 @@ function normalizePayload(raw) {
       laneIndex: Number.isFinite(it.laneIndex) ? it.laneIndex : 0,
       laneCount: Number.isFinite(it.laneCount) && it.laneCount > 0 ? it.laneCount : 1,
       label: it.label ?? "",
+      routeStatus: it.routeStatus ?? null,
+      operationStatus: it.operationStatus ?? null,
       reserveType: it.reserveType ?? "",
       pickupStationID: it.pickupStationID ?? "",
       dropoffStationID: it.dropoffStationID ?? "",

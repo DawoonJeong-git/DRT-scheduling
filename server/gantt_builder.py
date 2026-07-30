@@ -8,6 +8,7 @@ from .db_client import (
     get_reservations_by_dispatch_ids,
     get_dispatches_by_dispatch_ids,
 )
+from .status_utils import is_canceled_operation_status, is_visible_route, to_int
 
 KST = timezone(timedelta(hours=9))
 
@@ -124,6 +125,47 @@ def _parse_dispatch_ids(dispatch_ids):
 
     nx = _normalize_dispatch_id(s)
     return [nx] if nx else []
+
+
+def _is_empty_route_value(value) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, (list, tuple)):
+        return len(value) == 0
+
+    s = str(value).strip()
+    return s == "" or s.lower() in {"null", "none"} or s == "[]"
+
+
+def _prefer_updated_route_fields(route):
+    out = dict(route)
+    for target_key, updated_key, fallback_key in (
+        ("linkIDs", "updatedLinkIDs", "linkIDs"),
+        ("NodeIDs", "updatedNodeIDs", "NodeIDs"),
+        ("lon", "updatedLon", "lon"),
+        ("lat", "updatedLat", "lat"),
+    ):
+        preferred = route.get(updated_key)
+        out[target_key] = route.get(fallback_key) if _is_empty_route_value(preferred) else preferred
+    return out
+
+
+def _normalize_station_id(value) -> str:
+    s = _normalize_dispatch_id(value).upper()
+    if s.startswith("S"):
+        s = s[1:]
+    return s
+
+
+def _same_station_id(left, right) -> bool:
+    left_key = _normalize_station_id(left)
+    right_key = _normalize_station_id(right)
+    return bool(left_key) and left_key == right_key
+
+
+def _sort_int(value, default=0) -> int:
+    n = to_int(value)
+    return default if n is None else n
 
 
 def _sum_passengers(res_rows):
@@ -283,6 +325,7 @@ def _resolve_cell_status(candidates, cell_ms):
     """
     in_cands = [c for c in candidates if c["status"] == "IN_SERVICE"]
     mv_cands = [c for c in candidates if c["status"] == "MOVING"]
+    boarding_cands = [c for c in candidates if c["status"] == "BOARDING"]
 
     if in_cands and not mv_cands:
         return _best_candidate_by_overlap(in_cands, cell_ms)
@@ -307,6 +350,9 @@ def _resolve_cell_status(candidates, cell_ms):
         # 나머지는 기본 우선순위
         return _best_candidate_by_overlap(in_cands, cell_ms)
 
+    if boarding_cands:
+        return _best_candidate_by_overlap(boarding_cands, cell_ms)
+
     return None
 
 
@@ -314,6 +360,9 @@ def _build_operations(routes, route_dispatch_map, rr_by_dispatch, dispatch_by_di
     ops = {}
 
     for idx, r in enumerate(routes):
+        if not is_visible_route(r.get("routeStatus"), r.get("operationStatus")):
+            continue
+
         vehicle_id = str(r.get("vehicleID") or r.get("op_vehicleID") or "").strip()
         if not vehicle_id:
             continue
@@ -335,8 +384,6 @@ def _build_operations(routes, route_dispatch_map, rr_by_dispatch, dispatch_by_di
             else:
                 continue
 
-           
-
         s = max(win_start, s_raw)
         e = min(win_end, e_raw)
         if e <= s:
@@ -348,14 +395,27 @@ def _build_operations(routes, route_dispatch_map, rr_by_dispatch, dispatch_by_di
                 "vehicleID": vehicle_id,
                 "operationID": op_id,
                 "vehicleType": (r.get("vehicleType") or "").strip(),
+                "operationStatus": r.get("operationStatus"),
                 "total_s": s,
                 "total_e": e,
                 "svc_segments": [],
                 "mov_segments": [],
+                "wait_segments": [],
+                "route_edges": [],
             }
         else:
             ops[key]["total_s"] = min(ops[key]["total_s"], s)
             ops[key]["total_e"] = max(ops[key]["total_e"], e)
+
+        ops[key]["route_edges"].append(
+            {
+                "routeSeq": _sort_int(r.get("routeSeq")),
+                "startMs": s_raw,
+                "endMs": e_raw,
+                "originStationID": r.get("originStationID"),
+                "destStationID": r.get("destStationID"),
+            }
+        )
 
         if _has_dispatch(r.get("dispatchIDs")):
             dispatch_ids = route_dispatch_map[idx]
@@ -378,6 +438,8 @@ def _build_operations(routes, route_dispatch_map, rr_by_dispatch, dispatch_by_di
                     "label": label,
                     "dispatch_info": dinfo,
                     "dispatchIDs": dispatch_ids,
+                    "routeStatus": r.get("routeStatus"),
+                    "operationStatus": r.get("operationStatus"),
                     "sourceKey": f"{vehicle_id}|{op_id}|svc|{len(ops[key]['svc_segments'])}",
                 }
             )
@@ -386,7 +448,40 @@ def _build_operations(routes, route_dispatch_map, rr_by_dispatch, dispatch_by_di
                 {
                     "startMs": s,
                     "endMs": e,
+                    "routeStatus": r.get("routeStatus"),
+                    "operationStatus": r.get("operationStatus"),
                     "sourceKey": f"{vehicle_id}|{op_id}|mov|{len(ops[key]['mov_segments'])}",
+                }
+            )
+
+    for op in ops.values():
+        route_edges = sorted(
+            op.pop("route_edges", []),
+            key=lambda x: (x["startMs"], x["routeSeq"], x["endMs"]),
+        )
+        for prev_route, next_route in zip(route_edges, route_edges[1:]):
+            if not _same_station_id(
+                prev_route.get("destStationID"),
+                next_route.get("originStationID"),
+            ):
+                continue
+
+            wait_start = max(win_start, prev_route["endMs"])
+            wait_end = min(win_end, next_route["startMs"])
+            if wait_end <= wait_start:
+                continue
+
+            op["total_s"] = min(op["total_s"], wait_start)
+            op["total_e"] = max(op["total_e"], wait_end)
+            op["wait_segments"].append(
+                {
+                    "startMs": wait_start,
+                    "endMs": wait_end,
+                    "operationStatus": op.get("operationStatus"),
+                    "sourceKey": (
+                        f"{op['vehicleID']}|{op['operationID']}|wait|"
+                        f"{len(op['wait_segments'])}"
+                    ),
                 }
             )
 
@@ -407,6 +502,8 @@ def _append_interval_from_cells(intervals, vehicle_id, status, start_cell, end_c
         "laneIndex": 0,
         "laneCount": 1,
         "label": meta.get("label", ""),
+        "routeStatus": meta.get("routeStatus"),
+        "operationStatus": meta.get("operationStatus"),
     }
 
     if status == "IN_SERVICE":
@@ -450,6 +547,8 @@ def _build_component_cell_map(vehicle_id, comp_ops, drive_start, drive_end):
                         "operationID": op_id,
                         "label": seg.get("label", ""),
                         "dispatch_info": seg.get("dispatch_info", {}),
+                        "routeStatus": seg.get("routeStatus"),
+                        "operationStatus": seg.get("operationStatus"),
                     }
                 )
 
@@ -466,6 +565,27 @@ def _build_component_cell_map(vehicle_id, comp_ops, drive_start, drive_end):
                         "singleMinute": single,
                         "sourceKey": seg["sourceKey"],
                         "operationID": op_id,
+                        "routeStatus": seg.get("routeStatus"),
+                        "operationStatus": seg.get("operationStatus"),
+                        "label": "",
+                    }
+                )
+
+        for seg in d.get("wait_segments", []):
+            s = seg["startMs"]
+            e = seg["endMs"]
+            single = _is_single_minute_interval(s, e)
+            for cell in _minute_cells_covered(s, e):
+                cell_candidates.setdefault(cell, []).append(
+                    {
+                        "status": "BOARDING",
+                        "startMs": s,
+                        "endMs": e,
+                        "singleMinute": single,
+                        "sourceKey": seg["sourceKey"],
+                        "operationID": op_id,
+                        "routeStatus": seg.get("routeStatus"),
+                        "operationStatus": seg.get("operationStatus"),
                         "label": "",
                     }
                 )
@@ -485,6 +605,8 @@ def _build_component_cell_map(vehicle_id, comp_ops, drive_start, drive_end):
                     "label": chosen.get("label", ""),
                     "dispatch_info": chosen.get("dispatch_info", {}),
                     "sourceKey": chosen.get("sourceKey"),
+                    "routeStatus": chosen.get("routeStatus"),
+                    "operationStatus": chosen.get("operationStatus"),
                 },
             }
         else:
@@ -568,6 +690,9 @@ def build_gantt_payload(date_str: str):
     vehicles = []
     seen = set()
     for o in ops_catalog:
+        if is_canceled_operation_status(o.get("operationStatus")):
+            continue
+
         vid = str(o.get("vehicleID") or "").strip()
         if not vid or vid in seen:
             continue
@@ -577,11 +702,16 @@ def build_gantt_payload(date_str: str):
                 "vehicleID": vid,
                 "vehicleType": o.get("vehicleType") or "",
                 "operationServiceType": o.get("operationServiceType") or "",
+                "operationStatus": o.get("operationStatus"),
             }
         )
     vehicles.sort(key=lambda x: x["vehicleID"])
 
-    routes = get_routes_for_day(date_yyyymmdd)
+    routes = [
+        _prefer_updated_route_fields(r)
+        for r in get_routes_for_day(date_yyyymmdd)
+        if is_visible_route(r.get("routeStatus"), r.get("operationStatus"))
+    ]
 
     all_dispatch_ids = []
     route_dispatch_map = []
